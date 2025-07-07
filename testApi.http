@@ -1,0 +1,1652 @@
+# Laravel Social Network Project
+
+## Setup Instructions
+
+### 1. Create New Laravel Project
+```bash
+composer create-project laravel/laravel social-network
+cd social-network
+```
+
+### 2. Install Dependencies
+```bash
+composer require laravel/breeze
+composer require google-gemini-php/client
+npm install
+```
+
+### 3. Setup Authentication
+```bash
+php artisan breeze:install blade
+npm run build
+```
+
+### 4. Environment Configuration
+Add to your `.env` file:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+## Database Migrations
+
+### Create Migration Files
+```bash
+php artisan make:migration create_invitations_table
+php artisan make:migration create_user_connections_table
+php artisan make:migration create_posts_table
+```
+
+### Migration: invitations table
+```php
+<?php
+// database/migrations/xxxx_xx_xx_create_invitations_table.php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up()
+    {
+        Schema::create('invitations', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('sender_id')->constrained('users')->onDelete('cascade');
+            $table->foreignId('receiver_id')->constrained('users')->onDelete('cascade');
+            $table->enum('status', ['pending', 'accepted', 'declined'])->default('pending');
+            $table->timestamps();
+            
+            $table->unique(['sender_id', 'receiver_id']);
+        });
+    }
+
+    public function down()
+    {
+        Schema::dropIfExists('invitations');
+    }
+};
+```
+
+### Migration: user_connections table
+```php
+<?php
+// database/migrations/xxxx_xx_xx_create_user_connections_table.php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up()
+    {
+        Schema::create('user_connections', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->onDelete('cascade');
+            $table->foreignId('connected_user_id')->constrained('users')->onDelete('cascade');
+            $table->timestamps();
+            
+            $table->unique(['user_id', 'connected_user_id']);
+        });
+    }
+
+    public function down()
+    {
+        Schema::dropIfExists('user_connections');
+    }
+};
+```
+
+### Migration: posts table
+```php
+<?php
+// database/migrations/xxxx_xx_xx_create_posts_table.php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\Schema;
+
+return new class extends Migration
+{
+    public function up()
+    {
+        Schema::create('posts', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('user_id')->constrained()->onDelete('cascade');
+            $table->string('title');
+            $table->text('content');
+            $table->boolean('is_ai_generated')->default(false);
+            $table->timestamps();
+        });
+    }
+
+    public function down()
+    {
+        Schema::dropIfExists('posts');
+    }
+};
+```
+
+## Models
+
+### User Model (Updated)
+```php
+<?php
+// app/Models/User.php
+
+namespace App\Models;
+
+use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+
+class User extends Authenticatable
+{
+    use HasFactory, Notifiable;
+
+    protected $fillable = [
+        'name',
+        'email',
+        'password',
+    ];
+
+    protected $hidden = [
+        'password',
+        'remember_token',
+    ];
+
+    protected $casts = [
+        'email_verified_at' => 'datetime',
+        'password' => 'hashed',
+    ];
+
+    public function posts()
+    {
+        return $this->hasMany(Post::class);
+    }
+
+    public function sentInvitations()
+    {
+        return $this->hasMany(Invitation::class, 'sender_id');
+    }
+
+    public function receivedInvitations()
+    {
+        return $this->hasMany(Invitation::class, 'receiver_id');
+    }
+
+    public function connections()
+    {
+        return $this->belongsToMany(User::class, 'user_connections', 'user_id', 'connected_user_id')
+                    ->withTimestamps();
+    }
+
+    public function connectedBy()
+    {
+        return $this->belongsToMany(User::class, 'user_connections', 'connected_user_id', 'user_id')
+                    ->withTimestamps();
+    }
+
+    public function getAllConnections()
+    {
+        return $this->connections->merge($this->connectedBy);
+    }
+
+    public function isConnectedTo(User $user)
+    {
+        return $this->connections->contains($user) || $this->connectedBy->contains($user);
+    }
+
+    public function hasInvitationFrom(User $user)
+    {
+        return $this->receivedInvitations()
+                    ->where('sender_id', $user->id)
+                    ->where('status', 'pending')
+                    ->exists();
+    }
+
+    public function hasSentInvitationTo(User $user)
+    {
+        return $this->sentInvitations()
+                    ->where('receiver_id', $user->id)
+                    ->where('status', 'pending')
+                    ->exists();
+    }
+}
+```
+
+### Invitation Model
+```php
+<?php
+// app/Models/Invitation.php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Invitation extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'sender_id',
+        'receiver_id',
+        'status',
+    ];
+
+    public function sender()
+    {
+        return $this->belongsTo(User::class, 'sender_id');
+    }
+
+    public function receiver()
+    {
+        return $this->belongsTo(User::class, 'receiver_id');
+    }
+
+    public function scopePending($query)
+    {
+        return $query->where('status', 'pending');
+    }
+
+    public function scopeAccepted($query)
+    {
+        return $query->where('status', 'accepted');
+    }
+}
+```
+
+### Post Model
+```php
+<?php
+// app/Models/Post.php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class Post extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+        'user_id',
+        'title',
+        'content',
+        'is_ai_generated',
+    ];
+
+    protected $casts = [
+        'is_ai_generated' => 'boolean',
+    ];
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+}
+```
+
+## Services
+
+### Gemini AI Service
+```php
+<?php
+// app/Services/GeminiService.php
+
+namespace App\Services;
+
+use GeminiAPI\Client;
+use GeminiAPI\Resources\Parts\TextPart;
+use Exception;
+
+class GeminiService
+{
+    private Client $client;
+
+    public function __construct()
+    {
+        $apiKey = config('services.gemini.api_key');
+        
+        if (!$apiKey) {
+            throw new Exception('Gemini API key is not configured. Please set GEMINI_API_KEY in your .env file.');
+        }
+
+        $this->client = new Client($apiKey);
+    }
+
+    public function generatePostContent(string $prompt): string
+    {
+        try {
+            $enhancedPrompt = "Write a social media post about: {$prompt}. 
+
+            Guidelines:
+            - Make it engaging, conversational, and appropriate for sharing with friends
+            - Keep it between 150-300 words
+            - Use simple formatting: **bold** for emphasis and *italics* for style
+            - Include relevant hashtags at the end
+            - Write in a friendly, personal tone
+            - Break content into short paragraphs for readability
+            - Don't use excessive formatting or special characters
+            
+            Please write a clean, well-formatted social media post.";
+            
+            $response = $this->client->generativeModel('gemini-1.5-flash')
+                ->generateContent(new TextPart($enhancedPrompt));
+            
+            return $response->text();
+        } catch (Exception $e) {
+            throw new Exception("Failed to generate content: " . $e->getMessage());
+        }
+    }
+}
+```
+
+### Invitation Service
+```php
+<?php
+// app/Services/InvitationService.php
+
+namespace App\Services;
+
+use App\Models\Invitation;
+use App\Models\User;
+use App\Models\UserConnection;
+use Exception;
+use Illuminate\Support\Facades\DB;
+
+class InvitationService
+{
+    public function sendInvitation(User $sender, User $receiver): Invitation
+    {
+        if ($sender->id === $receiver->id) {
+            throw new Exception("You cannot send an invitation to yourself.");
+        }
+
+        if ($sender->isConnectedTo($receiver)) {
+            throw new Exception("You are already connected to this user.");
+        }
+
+        if ($sender->hasSentInvitationTo($receiver) || $receiver->hasSentInvitationTo($sender)) {
+            throw new Exception("An invitation already exists between you and this user.");
+        }
+
+        return Invitation::create([
+            'sender_id' => $sender->id,
+            'receiver_id' => $receiver->id,
+            'status' => 'pending',
+        ]);
+    }
+
+    public function acceptInvitation(Invitation $invitation): void
+    {
+        DB::transaction(function () use ($invitation) {
+            $invitation->update(['status' => 'accepted']);
+
+            // Create mutual connections
+            UserConnection::create([
+                'user_id' => $invitation->sender_id,
+                'connected_user_id' => $invitation->receiver_id,
+            ]);
+
+            UserConnection::create([
+                'user_id' => $invitation->receiver_id,
+                'connected_user_id' => $invitation->sender_id,
+            ]);
+        });
+    }
+
+    public function declineInvitation(Invitation $invitation): void
+    {
+        $invitation->update(['status' => 'declined']);
+    }
+}
+```
+
+## Policies
+
+### Post Policy
+```php
+<?php
+// app/Policies/PostPolicy.php
+
+namespace App\Policies;
+
+use App\Models\Post;
+use App\Models\User;
+
+class PostPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return true;
+    }
+
+    public function view(User $user, Post $post): bool
+    {
+        // User can view their own posts
+        if ($user->id === $post->user_id) {
+            return true;
+        }
+
+        // User can view posts from connected users
+        return $user->isConnectedTo($post->user);
+    }
+
+    public function create(User $user): bool
+    {
+        return true;
+    }
+
+    public function update(User $user, Post $post): bool
+    {
+        return $user->id === $post->user_id;
+    }
+
+    public function delete(User $user, Post $post): bool
+    {
+        return $user->id === $post->user_id;
+    }
+}
+```
+
+### Invitation Policy
+```php
+<?php
+// app/Policies/InvitationPolicy.php
+
+namespace App\Policies;
+
+use App\Models\Invitation;
+use App\Models\User;
+
+class InvitationPolicy
+{
+    public function accept(User $user, Invitation $invitation): bool
+    {
+        return $user->id === $invitation->receiver_id && $invitation->status === 'pending';
+    }
+
+    public function decline(User $user, Invitation $invitation): bool
+    {
+        return $user->id === $invitation->receiver_id && $invitation->status === 'pending';
+    }
+
+    public function cancel(User $user, Invitation $invitation): bool
+    {
+        return $user->id === $invitation->sender_id && $invitation->status === 'pending';
+    }
+}
+```
+
+## Controllers
+
+### InvitationController
+```php
+<?php
+// app/Http/Controllers/InvitationController.php
+
+namespace App\Http\Controllers;
+
+use App\Http\Requests\SendInvitationRequest;
+use App\Models\Invitation;
+use App\Models\User;
+use App\Services\InvitationService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+
+class InvitationController extends Controller
+{
+    use AuthorizesRequests;
+    
+    private InvitationService $invitationService;
+
+    public function __construct(InvitationService $invitationService)
+    {
+        $this->invitationService = $invitationService;
+    }
+
+    public function index()
+    {
+        $user = Auth::user();
+        
+        $receivedInvitations = $user->receivedInvitations()
+            ->with('sender')
+            ->pending()
+            ->latest()
+            ->get();
+
+        $sentInvitations = $user->sentInvitations()
+            ->with('receiver')
+            ->pending()
+            ->latest()
+            ->get();
+
+        return view('invitations.index', compact('receivedInvitations', 'sentInvitations'));
+    }
+
+    public function create()
+    {
+        $users = User::where('id', '!=', Auth::id())->get();
+        return view('invitations.create', compact('users'));
+    }
+
+    public function store(SendInvitationRequest $request)
+    {
+        try {
+            $receiver = User::findOrFail($request->receiver_id);
+            $this->invitationService->sendInvitation(Auth::user(), $receiver);
+
+            return redirect()->route('invitations.index')
+                ->with('success', 'Invitation sent successfully!');
+        } catch (\Exception $e) {
+            return back()->withErrors(['error' => $e->getMessage()]);
+        }
+    }
+
+    public function accept(Invitation $invitation)
+    {
+        $this->authorize('accept', $invitation);
+
+        try {
+            $this->invitationService->acceptInvitation($invitation);
+            return redirect()->route('invitations.index')
+                ->with('success', 'Invitation accepted successfully!');
+        } catch (\Exception $e) {
+            return back()->withErrors(['error' => $e->getMessage()]);
+        }
+    }
+
+    public function decline(Invitation $invitation)
+    {
+        $this->authorize('decline', $invitation);
+
+        try {
+            $this->invitationService->declineInvitation($invitation);
+            return redirect()->route('invitations.index')
+                ->with('success', 'Invitation declined.');
+        } catch (\Exception $e) {
+            return back()->withErrors(['error' => $e->getMessage()]);
+        }
+    }
+}
+```
+
+### PostController
+```php
+<?php
+// app/Http/Controllers/PostController.php
+
+namespace App\Http\Controllers;
+
+use App\Http\Requests\StorePostRequest;
+use App\Models\Post;
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Foundation\Auth\Access\AuthorizesRequests;
+
+class PostController extends Controller
+{
+    use AuthorizesRequests;
+
+    public function index()
+    {
+        $user = Auth::user();
+        $connectedUserIds = $user->getAllConnections()->pluck('id')->push($user->id);
+        
+        $posts = Post::whereIn('user_id', $connectedUserIds)
+            ->with('user')
+            ->latest()
+            ->paginate(10);
+
+        return view('posts.index', compact('posts'));
+    }
+
+    public function create()
+    {
+        return view('posts.create');
+    }
+
+    public function store(StorePostRequest $request)
+    {
+        $post = Auth::user()->posts()->create($request->validated());
+
+        return redirect()->route('posts.index')
+            ->with('success', 'Post created successfully!');
+    }
+
+    public function show(Post $post)
+    {
+        $this->authorize('view', $post);
+        return view('posts.show', compact('post'));
+    }
+
+    public function edit(Post $post)
+    {
+        $this->authorize('update', $post);
+        return view('posts.edit', compact('post'));
+    }
+
+    public function update(StorePostRequest $request, Post $post)
+    {
+        $this->authorize('update', $post);
+        
+        $post->update($request->validated());
+
+        return redirect()->route('posts.show', $post)
+            ->with('success', 'Post updated successfully!');
+    }
+
+    public function destroy(Post $post)
+    {
+        $this->authorize('delete', $post);
+        
+        $post->delete();
+
+        return redirect()->route('posts.index')
+            ->with('success', 'Post deleted successfully!');
+    }
+}
+```
+
+### AIPostController
+```php
+<?php
+// app/Http/Controllers/AIPostController.php
+
+namespace App\Http\Controllers;
+
+use App\Http\Requests\GeneratePostRequest;
+use App\Http\Requests\StorePostRequest;
+use App\Services\GeminiService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class AIPostController extends Controller
+{
+    private GeminiService $geminiService;
+
+    public function __construct(GeminiService $geminiService)
+    {
+        $this->geminiService = $geminiService;
+    }
+
+    public function create()
+    {
+        return view('ai-posts.create');
+    }
+
+    public function generate(GeneratePostRequest $request)
+    {
+        try {
+            $content = $this->geminiService->generatePostContent($request->prompt);
+            
+            return view('ai-posts.preview', [
+                'prompt' => $request->prompt,
+                'title' => ucfirst($request->prompt),
+                'content' => $content,
+            ]);
+        } catch (\Exception $e) {
+            return back()->withErrors(['error' => $e->getMessage()]);
+        }
+    }
+
+    public function store(StorePostRequest $request)
+    {
+        $post = Auth::user()->posts()->create([
+            'title' => $request->title,
+            'content' => $request->content,
+            'is_ai_generated' => true,
+        ]);
+
+        return redirect()->route('posts.show', $post)
+            ->with('success', 'AI-generated post created successfully!');
+    }
+}
+```
+
+## Form Requests
+
+### SendInvitationRequest
+```php
+<?php
+// app/Http/Requests/SendInvitationRequest.php
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class SendInvitationRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'receiver_id' => 'required|exists:users,id|different:' . auth()->id(),
+        ];
+    }
+
+    public function messages(): array
+    {
+        return [
+            'receiver_id.different' => 'You cannot send an invitation to yourself.',
+        ];
+    }
+}
+```
+
+### StorePostRequest
+```php
+<?php
+// app/Http/Requests/StorePostRequest.php
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class StorePostRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'title' => 'required|string|max:255',
+            'content' => 'required|string',
+        ];
+    }
+}
+```
+
+### GeneratePostRequest
+```php
+<?php
+// app/Http/Requests/GeneratePostRequest.php
+
+namespace App\Http\Requests;
+
+use Illuminate\Foundation\Http\FormRequest;
+
+class GeneratePostRequest extends FormRequest
+{
+    public function authorize(): bool
+    {
+        return true;
+    }
+
+    public function rules(): array
+    {
+        return [
+            'prompt' => 'required|string|max:500',
+        ];
+    }
+}
+```
+
+## Configuration
+
+### Services Configuration
+```php
+<?php
+// config/services.php
+
+return [
+    // ... other services
+
+    'gemini' => [
+        'api_key' => env('GEMINI_API_KEY'),
+    ],
+];
+```
+
+## Routes
+
+### Web Routes
+```php
+<?php
+// routes/web.php
+
+use App\Http\Controllers\AIPostController;
+use App\Http\Controllers\InvitationController;
+use App\Http\Controllers\PostController;
+use App\Http\Controllers\ProfileController;
+use Illuminate\Support\Facades\Route;
+
+Route::get('/', function () {
+    return view('welcome');
+});
+
+Route::get('/dashboard', function () {
+    return view('dashboard');
+})->middleware(['auth', 'verified'])->name('dashboard');
+
+Route::middleware('auth')->group(function () {
+    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
+    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
+    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+
+    // Invitations
+    Route::get('/invitations', [InvitationController::class, 'index'])->name('invitations.index');
+    Route::get('/invitations/create', [InvitationController::class, 'create'])->name('invitations.create');
+    Route::post('/invitations', [InvitationController::class, 'store'])->name('invitations.store');
+    Route::patch('/invitations/{invitation}/accept', [InvitationController::class, 'accept'])->name('invitations.accept');
+    Route::patch('/invitations/{invitation}/decline', [InvitationController::class, 'decline'])->name('invitations.decline');
+
+    // Posts
+    Route::resource('posts', PostController::class);
+
+    // AI Posts
+    Route::get('/ai-posts/create', [AIPostController::class, 'create'])->name('ai-posts.create');
+    Route::post('/ai-posts/generate', [AIPostController::class, 'generate'])->name('ai-posts.generate');
+    Route::post('/ai-posts', [AIPostController::class, 'store'])->name('ai-posts.store');
+});
+
+require __DIR__.'/auth.php';
+```
+
+## Views
+
+### Dashboard
+```blade
+{{-- resources/views/dashboard.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+            {{ __('Dashboard') }}
+        </h2>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-7xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6 text-gray-900">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div class="bg-blue-50 p-6 rounded-lg">
+                            <h3 class="text-lg font-semibold text-blue-800 mb-2">Posts</h3>
+                            <p class="text-blue-600">Share your thoughts with connected friends</p>
+                            <div class="mt-4 space-y-2">
+                                <a href="{{ route('posts.index') }}" class="block bg-blue-600 text-white px-4 py-2 rounded text-center hover:bg-blue-700">
+                                    View Posts
+                                </a>
+                                <a href="{{ route('posts.create') }}" class="block bg-blue-500 text-white px-4 py-2 rounded text-center hover:bg-blue-600">
+                                    Create Post
+                                </a>
+                                <a href="{{ route('ai-posts.create') }}" class="block bg-purple-500 text-white px-4 py-2 rounded text-center hover:bg-purple-600">
+                                    Create AI Post
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="bg-green-50 p-6 rounded-lg">
+                            <h3 class="text-lg font-semibold text-green-800 mb-2">Invitations</h3>
+                            <p class="text-green-600">Connect with other users</p>
+                            <div class="mt-4 space-y-2">
+                                <a href="{{ route('invitations.index') }}" class="block bg-green-600 text-white px-4 py-2 rounded text-center hover:bg-green-700">
+                                    View Invitations
+                                </a>
+                                <a href="{{ route('invitations.create') }}" class="block bg-green-500 text-white px-4 py-2 rounded text-center hover:bg-green-600">
+                                    Send Invitation
+                                </a>
+                            </div>
+                        </div>
+
+                        <div class="bg-yellow-50 p-6 rounded-lg">
+                            <h3 class="text-lg font-semibold text-yellow-800 mb-2">Connections</h3>
+                            <p class="text-yellow-600">{{ auth()->user()->getAllConnections()->count() }} active connections</p>
+                            <div class="mt-4">
+                                <span class="text-sm text-yellow-700">
+                                    Build your network by sending and accepting invitations
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### Posts Index
+```blade
+{{-- resources/views/posts/index.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <div class="flex justify-between items-center">
+            <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+                {{ __('Posts') }}
+            </h2>
+            <div class="space-x-2">
+                <a href="{{ route('posts.create') }}" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                    Create Post
+                </a>
+                <a href="{{ route('ai-posts.create') }}" class="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded">
+                    Create AI Post
+                </a>
+            </div>
+        </div>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-4xl mx-auto sm:px-6 lg:px-8">
+            @if($posts->count() > 0)
+                <div class="space-y-6">
+                    @foreach($posts as $post)
+                        <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                            <div class="p-6">
+                                <div class="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h3 class="text-lg font-semibold text-gray-900">
+                                            <a href="{{ route('posts.show', $post) }}" class="hover:text-blue-600">
+                                                {{ $post->title }}
+                                            </a>
+                                        </h3>
+                                        <p class="text-sm text-gray-600">
+                                            by {{ $post->user->name }}
+                                            @if($post->is_ai_generated)
+                                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                                                    AI Generated
+                                                </span>
+                                            @endif
+                                        </p>
+                                    </div>
+                                    <span class="text-sm text-gray-500">{{ $post->created_at->diffForHumans() }}</span>
+                                </div>
+                                
+                                <div class="text-gray-700 mb-4">
+                                    @php
+                                        $cleanContent = preg_replace(['/\*\*(.*?)\*\*/', '/\*(.*?)\*/', '/#(\w+)/'], ['$1', '$1', '#$1'], $post->content);
+                                        $preview = Str::limit($cleanContent, 200);
+                                    @endphp
+                                    {{ $preview }}
+                                </div>
+                                
+                                <div class="mt-4 flex justify-between items-center">
+                                    <a href="{{ route('posts.show', $post) }}" class="text-blue-600 hover:text-blue-800">
+                                        Read more
+                                    </a>
+                                    
+                                    @can('update', $post)
+                                        <div class="space-x-2">
+                                            <a href="{{ route('posts.edit', $post) }}" class="text-green-600 hover:text-green-800">
+                                                Edit
+                                            </a>
+                                            <form method="POST" action="{{ route('posts.destroy', $post) }}" class="inline">
+                                                @csrf
+                                                @method('DELETE')
+                                                <button type="submit" class="text-red-600 hover:text-red-800" 
+                                                        onclick="return confirm('Are you sure you want to delete this post?')">
+                                                    Delete
+                                                </button>
+                                            </form>
+                                        </div>
+                                    @endcan
+                                </div>
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+                
+                <div class="mt-6">
+                    {{ $posts->links() }}
+                </div>
+            @else
+                <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                    <div class="p-6 text-center">
+                        <h3 class="text-lg font-medium text-gray-900 mb-2">No posts yet</h3>
+                        <p class="text-gray-600 mb-4">Start by creating your first post or connecting with other users to see their posts.</p>
+                        <div class="space-x-2">
+                            <a href="{{ route('posts.create') }}" class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                                Create Your First Post
+                            </a>
+                            <a href="{{ route('invitations.create') }}" class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded">
+                                Send Invitations
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            @endif
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### Create Post
+```blade
+{{-- resources/views/posts/create.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+            {{ __('Create Post') }}
+        </h2>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-2xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <form method="POST" action="{{ route('posts.store') }}">
+                        @csrf
+
+                        <div class="mb-4">
+                            <label for="title" class="block text-sm font-medium text-gray-700 mb-2">
+                                Title
+                            </label>
+                            <input type="text" name="title" id="title" 
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                                   value="{{ old('title') }}" required>
+                            @error('title')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="content" class="block text-sm font-medium text-gray-700 mb-2">
+                                Content
+                            </label>
+                            <textarea name="content" id="content" rows="8"
+                                      class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                                      required>{{ old('content') }}</textarea>
+                            @error('content')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                        </div>
+
+                        <div class="flex justify-between">
+                            <a href="{{ route('posts.index') }}" 
+                               class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">
+                                Cancel
+                            </a>
+                            <button type="submit" 
+                                    class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                                Create Post
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### AI Post Create View
+```blade
+{{-- resources/views/ai-posts/create.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+            {{ __('Generate AI Post') }}
+        </h2>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-2xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <div class="mb-6">
+                        <div class="flex items-center space-x-2 mb-4">
+                            <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                            </svg>
+                            <h3 class="text-lg font-medium text-gray-900">AI Content Generator</h3>
+                        </div>
+                        <div class="bg-purple-50 border border-purple-200 rounded-md p-4">
+                            <p class="text-sm text-purple-700">
+                                <strong>How it works:</strong> Enter a topic or prompt, and our AI will generate engaging social media content for you. 
+                                You'll be able to preview and edit the content before publishing.
+                            </p>
+                        </div>
+                    </div>
+
+                    <form method="POST" action="{{ route('ai-posts.generate') }}">
+                        @csrf
+
+                        <div class="mb-6">
+                            <label for="prompt" class="block text-sm font-medium text-gray-700 mb-2">
+                                What would you like to write about?
+                            </label>
+                            <input type="text" name="prompt" id="prompt" 
+                                   placeholder="e.g., my weekend trip to the mountains, thoughts on remote work, favorite book recommendation"
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                                   value="{{ old('prompt') }}" required>
+                            @error('prompt')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                            <p class="mt-1 text-sm text-gray-500">
+                                Be specific for better results. You can edit the generated content before publishing.
+                            </p>
+                        </div>
+
+                        <div class="flex justify-between">
+                            <a href="{{ route('posts.index') }}" 
+                               class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">
+                                Cancel
+                            </a>
+                            <button type="submit" 
+                                    class="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded flex items-center space-x-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path>
+                                </svg>
+                                <span>Generate Content</span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### AI Post Preview View
+```blade
+{{-- resources/views/ai-posts/preview.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+            {{ __('Preview AI Generated Post') }}
+        </h2>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-2xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <div class="mb-6">
+                        <div class="flex items-center space-x-2 mb-4">
+                            <svg class="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                            </svg>
+                            <h3 class="text-lg font-medium text-gray-900">Content Generated Successfully!</h3>
+                        </div>
+                        <div class="bg-green-50 border border-green-200 rounded-md p-4">
+                            <p class="text-sm text-green-700">
+                                <strong>Prompt:</strong> "{{ $prompt }}"
+                            </p>
+                        </div>
+                    </div>
+
+                    <form method="POST" action="{{ route('ai-posts.store') }}">
+                        @csrf
+
+                        <div class="mb-4">
+                            <label for="title" class="block text-sm font-medium text-gray-700 mb-2">
+                                Title <span class="text-gray-500">(you can edit this)</span>
+                            </label>
+                            <input type="text" name="title" id="title" 
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                                   value="{{ old('title', $title) }}" required>
+                            @error('title')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                        </div>
+
+                        <div class="mb-6">
+                            <label for="content" class="block text-sm font-medium text-gray-700 mb-2">
+                                Generated Content <span class="text-gray-500">(you can edit this)</span>
+                            </label>
+                            <textarea name="content" id="content" rows="10"
+                                      class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-purple-500 focus:border-purple-500"
+                                      required>{{ old('content', $content) }}</textarea>
+                            @error('content')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                            <p class="mt-1 text-sm text-gray-500">
+                                Review and edit the generated content as needed before publishing.
+                            </p>
+                        </div>
+
+                        <div class="mb-6 bg-purple-50 border border-purple-200 rounded-md p-4">
+                            <div class="flex items-center">
+                                <input type="checkbox" id="ai_notice" class="h-4 w-4 text-purple-600 focus:ring-purple-500 border-gray-300 rounded" checked disabled>
+                                <label for="ai_notice" class="ml-2 block text-sm text-purple-700">
+                                    This post will be marked as AI-generated
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="flex justify-between">
+                            <a href="{{ route('ai-posts.create') }}" 
+                               class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">
+                                Generate New Content
+                            </a>
+                            <div class="space-x-2">
+                                <button type="submit" 
+                                        class="bg-purple-500 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded">
+                                    Publish Post
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### Invitations Index View
+```blade
+{{-- resources/views/invitations/index.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <div class="flex justify-between items-center">
+            <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+                {{ __('Invitations') }}
+            </h2>
+            <a href="{{ route('invitations.create') }}" 
+               class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                Send Invitation
+            </a>
+        </div>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-4xl mx-auto sm:px-6 lg:px-8 space-y-6">
+            <!-- Received Invitations -->
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">
+                        Received Invitations ({{ $receivedInvitations->count() }})
+                    </h3>
+                    
+                    @if($receivedInvitations->count() > 0)
+                        <div class="space-y-4">
+                            @foreach($receivedInvitations as $invitation)
+                                <div class="border border-gray-200 rounded-lg p-4 flex justify-between items-center">
+                                    <div>
+                                        <p class="font-medium text-gray-900">{{ $invitation->sender->name }}</p>
+                                        <p class="text-sm text-gray-600">{{ $invitation->sender->email }}</p>
+                                        <p class="text-xs text-gray-500">Sent {{ $invitation->created_at->diffForHumans() }}</p>
+                                    </div>
+                                    <div class="space-x-2">
+                                        <form method="POST" action="{{ route('invitations.accept', $invitation) }}" class="inline">
+                                            @csrf
+                                            @method('PATCH')
+                                            <button type="submit" 
+                                                    class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded text-sm">
+                                                Accept
+                                            </button>
+                                        </form>
+                                        <form method="POST" action="{{ route('invitations.decline', $invitation) }}" class="inline">
+                                            @csrf
+                                            @method('PATCH')
+                                            <button type="submit" 
+                                                    class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded text-sm">
+                                                Decline
+                                            </button>
+                                        </form>
+                                    </div>
+                                </div>
+                            @endforeach
+                        </div>
+                    @else
+                        <p class="text-gray-600">No pending invitations received.</p>
+                    @endif
+                </div>
+            </div>
+
+            <!-- Sent Invitations -->
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">
+                        Sent Invitations ({{ $sentInvitations->count() }})
+                    </h3>
+                    
+                    @if($sentInvitations->count() > 0)
+                        <div class="space-y-4">
+                            @foreach($sentInvitations as $invitation)
+                                <div class="border border-gray-200 rounded-lg p-4 flex justify-between items-center">
+                                    <div>
+                                        <p class="font-medium text-gray-900">{{ $invitation->receiver->name }}</p>
+                                        <p class="text-sm text-gray-600">{{ $invitation->receiver->email }}</p>
+                                        <p class="text-xs text-gray-500">Sent {{ $invitation->created_at->diffForHumans() }}</p>
+                                    </div>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">
+                                            Pending
+                                        </span>
+                                    </div>
+                                </div>
+                            @endforeach
+                        </div>
+                    @else
+                        <p class="text-gray-600">No pending invitations sent.</p>
+                    @endif
+                </div>
+            </div>
+
+            <!-- Connections Summary -->
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <h3 class="text-lg font-semibold text-gray-900 mb-4">Your Network</h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div class="text-center p-4 bg-blue-50 rounded-lg">
+                            <div class="text-2xl font-bold text-blue-600">{{ auth()->user()->getAllConnections()->count() }}</div>
+                            <div class="text-sm text-blue-800">Active Connections</div>
+                        </div>
+                        <div class="text-center p-4 bg-yellow-50 rounded-lg">
+                            <div class="text-2xl font-bold text-yellow-600">{{ $receivedInvitations->count() }}</div>
+                            <div class="text-sm text-yellow-800">Pending Received</div>
+                        </div>
+                        <div class="text-center p-4 bg-green-50 rounded-lg">
+                            <div class="text-2xl font-bold text-green-600">{{ $sentInvitations->count() }}</div>
+                            <div class="text-sm text-green-800">Pending Sent</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+### Posts Show View
+```blade
+{{-- resources/views/posts/show.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <div class="flex justify-between items-center">
+            <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+                {{ __('Post Details') }}
+            </h2>
+            <a href="{{ route('posts.index') }}" 
+               class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">
+                Back to Posts
+            </a>
+        </div>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-4xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <div class="mb-6">
+                        <div class="flex justify-between items-start mb-4">
+                            <div>
+                                <h1 class="text-2xl font-bold text-gray-900 mb-2">{{ $post->title }}</h1>
+                                <div class="flex items-center space-x-4 text-sm text-gray-600">
+                                    <span>by {{ $post->user->name }}</span>
+                                    <span>{{ $post->created_at->format('M j, Y \a\t g:i A') }}</span>
+                                    @if($post->is_ai_generated)
+                                        <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                                            <svg class="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                                <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                                            </svg>
+                                            AI Generated
+                                        </span>
+                                    @endif
+                                </div>
+                            </div>
+                            
+                            @can('update', $post)
+                                <div class="flex space-x-2">
+                                    <a href="{{ route('posts.edit', $post) }}" 
+                                       class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded text-sm">
+                                        Edit
+                                    </a>
+                                    <form method="POST" action="{{ route('posts.destroy', $post) }}" class="inline">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button type="submit" 
+                                                class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded text-sm"
+                                                onclick="return confirm('Are you sure you want to delete this post?')">
+                                            Delete
+                                        </button>
+                                    </form>
+                                </div>
+                            @endcan
+                        </div>
+                    </div>
+
+                    <div class="prose max-w-none">
+                        <div class="text-gray-700 leading-relaxed text-base space-y-4">
+                            @php
+                                $formattedContent = $post->content;
+                                
+                                // Convert markdown-style formatting to HTML
+                                // Handle section headers like "* **Title:**" but don't add extra colons
+                                $formattedContent = preg_replace('/\*\s\*\*([^*]+)\*\*:?/', '<br><strong>$1:</strong>', $formattedContent);
+                                
+                                // Convert **text** to bold
+                                $formattedContent = preg_replace('/\*\*([^*]+)\*\*/', '<strong>$1</strong>', $formattedContent);
+                                
+                                // Convert *text* to italic
+                                $formattedContent = preg_replace('/\*([^*]+)\*/', '<em>$1</em>', $formattedContent);
+                                
+                                // Format hashtags
+                                $formattedContent = preg_replace('/#(\w+)/', '<span class="inline-block bg-blue-100 text-blue-800 text-sm px-2 py-1 rounded mr-1">#$1</span>', $formattedContent);
+                                
+                                // Convert line breaks to proper paragraphs
+                                $formattedContent = nl2br($formattedContent);
+                                
+                                // Add spacing between sections
+                                $formattedContent = preg_replace('/(<br\s*\/?>){2,}/', '</p><p class="mt-4">', $formattedContent);
+                                
+                                // Wrap in paragraph tags
+                                $formattedContent = '<p>' . $formattedContent . '</p>';
+                            @endphp
+                            
+                            {!! $formattedContent !!}
+                        </div>
+                    </div>
+
+                    @if($post->updated_at != $post->created_at)
+                        <div class="mt-6 pt-4 border-t border-gray-200">
+                            <p class="text-sm text-gray-500">
+                                Last updated: {{ $post->updated_at->format('M j, Y \a\t g:i A') }}
+                            </p>
+                        </div>
+                    @endif
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        .prose p {
+            margin-bottom: 1rem;
+        }
+        .prose p:last-child {
+            margin-bottom: 0;
+        }
+        .prose strong {
+            font-weight: 600;
+            color: #1F2937;
+        }
+        .prose em {
+            font-style: italic;
+            color: #6B7280;
+        }
+    </style>
+</x-app-layout>
+```
+
+### Posts Edit View
+```blade
+{{-- resources/views/posts/edit.blade.php --}}
+<x-app-layout>
+    <x-slot name="header">
+        <h2 class="font-semibold text-xl text-gray-800 leading-tight">
+            {{ __('Edit Post') }}
+        </h2>
+    </x-slot>
+
+    <div class="py-12">
+        <div class="max-w-2xl mx-auto sm:px-6 lg:px-8">
+            <div class="bg-white overflow-hidden shadow-sm sm:rounded-lg">
+                <div class="p-6">
+                    <form method="POST" action="{{ route('posts.update', $post) }}">
+                        @csrf
+                        @method('PATCH')
+
+                        <div class="mb-4">
+                            <label for="title" class="block text-sm font-medium text-gray-700 mb-2">
+                                Title
+                            </label>
+                            <input type="text" name="title" id="title" 
+                                   class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                                   value="{{ old('title', $post->title) }}" required>
+                            @error('title')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                        </div>
+
+                        <div class="mb-4">
+                            <label for="content" class="block text-sm font-medium text-gray-700 mb-2">
+                                Content
+                            </label>
+                            <textarea name="content" id="content" rows="8"
+                                      class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                                      required>{{ old('content', $post->content) }}</textarea>
+                            @error('content')
+                                <p class="mt-1 text-sm text-red-600">{{ $message }}</p>
+                            @enderror
+                        </div>
+
+                        @if($post->is_ai_generated)
+                            <div class="mb-4 bg-purple-50 border border-purple-200 rounded-md p-4">
+                                <div class="flex items-center">
+                                    <svg class="w-5 h-5 text-purple-600 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                                        <path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"></path>
+                                    </svg>
+                                    <span class="text-sm text-purple-700">This post was originally generated by AI</span>
+                                </div>
+                            </div>
+                        @endif
+
+                        <div class="flex justify-between">
+                            <a href="{{ route('posts.show', $post) }}" 
+                               class="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded">
+                                Cancel
+                            </a>
+                            <button type="submit" 
+                                    class="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded">
+                                Update Post
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</x-app-layout>
+```
+
+## Additional Setup Steps
+
+### Register Policies in AuthServiceProvider
+```php
+<?php
+// app/Providers/AuthServiceProvider.php
+
+namespace App\Providers;
+
+use App\Models\Invitation;
+use App\Models\Post;
+use App\Policies\InvitationPolicy;
+use App\Policies\PostPolicy;
+use Illuminate\Foundation\Support\Providers\AuthServiceProvider as ServiceProvider;
+
+class AuthServiceProvider extends ServiceProvider
+{
+    protected $policies = [
+        Post::class => PostPolicy::class,
+        Invitation::class => InvitationPolicy::class,
+    ];
+
+    public function boot(): void
+    {
+        //
+    }
+}
+```
+
+### Final Migration Commands
+```bash
+php artisan migrate
+```
+
+### Seed Database (Optional)
+```php
+<?php
+// database/seeders/UserSeeder.php
+
+namespace Database\Seeders;
+
+use App\Models\User;
+use Illuminate\Database\Seeder;
+use Illuminate\Support\Facades\Hash;
+
+class UserSeeder extends Seeder
+{
+    public function run(): void
+    {
+        User::create([
+            'name' => 'John Doe',
+            'email' => 'john@example.com',
+            'password' => Hash::make('password'),
+        ]);
+
+        User::create([
+            'name' => 'Jane Smith',
+            'email' => 'jane@example.com',
+            'password' => Hash::make('password'),
+        ]);
+
+        User::create([
+            'name' => 'Bob Johnson',
+            'email' => 'bob@example.com',
+            'password' => Hash::make('password'),
+        ]);
+    }
+}
+```
+
+Run the seeder:
+```bash
+php artisan db:seed --class=UserSeeder
+```
+
+## Testing the Application
+
+1. **Start the development server:**
+   ```bash
+   php artisan serve
+   ```
+
+2. **Register new users or use seeded accounts**
+
+3. **Test the workflow:**
+   - Send invitations between users
+   - Accept invitations to create connections
+   - Create regular posts
+   - Generate AI posts using Gemini
+   - Verify that posts are only visible to connected users
+
+## Key Features Implemented
+
+✅ **User Authentication** - Laravel Breeze integration
+✅ **Invitation System** - Send, accept, decline invitations
+✅ **Mutual Connections** - Bidirectional relationships
+✅ **Post Visibility Control** - Only connected users can see posts
+✅ **AI Content Generation** - Gemini API integration
+✅ **Content Preview & Edit** - Users can modify AI-generated content
+✅ **Clean Architecture** - Services, policies, form requests
+✅ **Proper Relationships** - Eloquent models with appropriate relationships
+✅ **Security** - Authorization policies for all actions
+
+This implementation follows Laravel best practices and provides a complete social networking platform with AI-powered content generation.
