@@ -1,5 +1,4 @@
 <?php
-// routes/web.php
 
 use App\Http\Controllers\AIPostController;
 use App\Http\Controllers\InvitationController;
@@ -18,7 +17,7 @@ Route::get('/dashboard', function () {
     return view('dashboard');
 })->middleware(['auth', 'verified'])->name('dashboard');
 
-Route::middleware('auth')->group(function () {
+Route::middleware('auth')->group(function (): void {
     Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
@@ -35,6 +34,9 @@ Route::middleware('auth')->group(function () {
 
     // AI Posts
     Route::get('/ai-posts/create', [AIPostController::class, 'create'])->name('ai-posts.create');
+    Route::get('/ai-posts/generate', function() {
+        return redirect()->route('ai-posts.create')->with('info', 'Please use the form to generate content.');
+    })->name('ai-posts.generate.redirect');
     Route::post('/ai-posts/generate', [AIPostController::class, 'generate'])->name('ai-posts.generate');
     Route::post('/ai-posts', [AIPostController::class, 'store'])->name('ai-posts.store');
 
