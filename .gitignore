@@ -24,3 +24,7 @@ Homestead.yaml
 Thumbs.db
 *.md
 !README.md
+IMPLEMENTATION-COMPLETE_swwp.md
+LIKE-COMMENT-IMPLEMENTATION_swwp.md
+UX-UI-IMPROVEMENTS_swwp.md
+testApi_swwp.http
